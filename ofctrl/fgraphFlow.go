@@ -799,7 +799,9 @@ func (self *Flow) installFlowActions(flowMod *openflow13.FlowMod,
 
 		case "loadReg":
 			// Create NX load action
-			loadRegAction := flowAction.loadAct.GetActionMessage()
+			loadAct := flowAction.loadAct
+			self.Table.Switch.ResetFieldLength(loadAct.Field)
+			loadRegAction := loadAct.GetActionMessage()
 
 			// Add load action to the instruction
 			err = actInstr.AddAction(loadRegAction, true)
@@ -1430,6 +1432,8 @@ func (self *Flow) MoveRegs(srcName string, dstName string, srcRange *openflow13.
 	if err != nil {
 		return err
 	}
+	self.Table.Switch.ResetFieldLength(moveAct.SrcField)
+	self.Table.Switch.ResetFieldLength(moveAct.DstField)
 
 	action := new(FlowAction)
 	action.ActionType = "moveReg"
