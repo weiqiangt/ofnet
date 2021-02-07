@@ -33,11 +33,15 @@ type OpenFlowModMessage interface {
 }
 
 type Transaction struct {
-	ofSwitch       *OFSwitch
-	ID             uint32
-	flag           TransactionType
-	closed         bool
-	lock           sync.Mutex
+	ofSwitch *OFSwitch
+	ID       uint32
+	flag     TransactionType
+	closed   bool
+	lock     sync.Mutex
+	// err is used to catch any error in this transaction. Since
+	// bundle adding error may be received later than control
+	// message, err is able to reject false positive result.
+	err            error
 	successAdd     map[uint32]bool
 	controlReplyCh chan MessageResult
 	controlIntCh   chan MessageResult
@@ -118,28 +122,25 @@ func (tx *Transaction) createBundleAddFlowMessage(flowMod *openflow13.FlowMod) (
 }
 
 func (tx *Transaction) listenReply() {
-	for {
-		select {
-		case reply, ok := <-tx.controlReplyCh:
-			if !ok { // controlReplyCh closed.
-				return
+	for reply := range tx.controlReplyCh {
+		switch reply.msgType {
+		case BundleControlMessage:
+			select {
+			case tx.controlIntCh <- reply:
+			case <-time.After(messageTimeout):
+				log.Warningln("BundleControlMessage reply message accept timeout")
 			}
-			switch reply.msgType {
-			case BundleControlMessage:
-				select {
-				case tx.controlIntCh <- reply:
-				case <-time.After(messageTimeout):
-					log.Warningln("BundleControlMessage reply message accept timeout")
-				}
-			case BundleAddMessage:
-				if !reply.succeed {
-					func() {
-						tx.lock.Lock()
-						defer tx.lock.Unlock()
-						// Remove failed add message from successAdd.
-						delete(tx.successAdd, reply.xID)
-					}()
-				}
+		case BundleAddMessage:
+			if !reply.succeed {
+				func() {
+					tx.lock.Lock()
+					defer tx.lock.Unlock()
+					// Remove failed add message from successAdd.
+					delete(tx.successAdd, reply.xID)
+					if tx.err != nil {
+						tx.err = fmt.Errorf("one message adding of this bundle failed")
+					}
+				}()
 			}
 		}
 	}
@@ -196,7 +197,7 @@ func (tx *Transaction) Complete() (int, error) {
 	}
 	tx.lock.Lock()
 	defer tx.lock.Unlock()
-	return len(tx.successAdd), nil
+	return len(tx.successAdd), tx.err
 }
 
 // Commit commits the bundle configuration. If transaction is not closed, it sends OFPBCT_CLOSE_REQUEST in advance.
@@ -212,7 +213,9 @@ func (tx *Transaction) Commit() error {
 	if err := tx.sendControlRequest(msg.Header.Xid, msg); err != nil {
 		return err
 	}
-	return nil
+	tx.lock.Lock()
+	defer tx.lock.Unlock()
+	return tx.err
 }
 
 // Abort discards the bundle configuration. If transaction is not closed, it sends OFPBCT_CLOSE_REQUEST in advance.
